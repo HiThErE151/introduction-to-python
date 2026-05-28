@@ -63,6 +63,19 @@ TEMPLATES: dict[str, dict] = {
         "aggro": False,
         "killable": True,
         "wander": False,
+    },
+    "Hatsune_Miku": {
+        "name": "Hatsune Miku",
+        "key_words": ("Hatsune", "Miku"),
+        "room_description": "&bHatsune Miku stands here, being her normal diva self.&N",
+        "description": ("A teen girl with long teal twin-tails and a futuristic black-and-teal school uniform"),
+        "race": "Virtual Singer",
+        "class": "Vocaloid",
+        "level": 50,
+        "stats": [100, 90, 100, 90, 99, 100],
+        "aggro": False,
+        "killable": False,
+        "wander": True,
     }
 }
 

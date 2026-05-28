@@ -41,7 +41,7 @@ ROOMS: dict[int, Room] = {
             "exits": [
                 {"direction": "east", "roomId": 99004, "external": True},
             ],
-            "mobs": [M.spawn("Bob")],
+            "mobs": [M.spawn("Bob"), M.spawn("Hatsune_Miku")],
         }
     ),
 }
