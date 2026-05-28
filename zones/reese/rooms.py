@@ -31,4 +31,17 @@ ROOMS: dict[int, Room] = {
             "mobs": [M.spawn("The_Inn_Maid")],  # two independent students
         }
     ),
+    2: Room(
+        {
+            "number": 2,
+            "name": "Downtown &yT&bo&rk&yy&bo",
+            "description": "The bussling capitol of Japan, full of weebs and cars",
+            "indoors": False,
+            "terrain": "city",
+            "exits": [
+                {"direction": "east", "roomId": 99004, "external": True},
+            ],
+            "mobs": [M.spawn("Bob")],
+        }
+    ),
 }

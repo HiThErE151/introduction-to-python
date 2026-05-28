@@ -50,6 +50,19 @@ TEMPLATES: dict[str, dict] = {
         "stats": [60, 65, 60, 80, 70, 75],
         "aggro": False,
         "wander": True,
+    },
+    "Bob": {
+        "name": "Bob",
+        "key_words": ("Bob"),
+        "room_description": "&bBob stands on the sidewalk talking to himself like a crazy person.&N",
+        "description": ("A man who's known for being a local kook. But beneath his craziness is immense amounts of strength."),
+        "race": "Human", 
+        "class": "Barbarian",
+        "level": 50,
+        "stats": [100, 90, 100, 90, 99, 2],
+        "aggro": False,
+        "killable": True,
+        "wander": False,
     }
 }
 
