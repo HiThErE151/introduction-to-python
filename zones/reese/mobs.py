@@ -69,13 +69,23 @@ TEMPLATES: dict[str, dict] = {
         "key_words": ("Hatsune", "Miku"),
         "room_description": "&bHatsune Miku stands here, being her normal diva self.&N",
         "description": ("A teen girl with long teal twin-tails and a futuristic black-and-teal school uniform"),
-        "race": "Virtual Singer",
+        "race": "Android",
         "class": "Vocaloid",
         "level": 50,
         "stats": [100, 90, 100, 90, 99, 100],
         "aggro": False,
         "killable": False,
         "wander": True,
+        "responses": {
+            "hi": ("&bHatsune Miku&Wlooks at you.&N",
+                   "She says to you '&LOh, hi there! Do you want to come to my concert?&N'"),
+            "no": ("&bShe begins to cry.&N",
+                   "She says'&LOh, ok.&N"),
+            "yes": ("&bHer&Weyes start to gleam with joy.&N",
+                    "She says 'Great! It's at nine at the Tokyo Dome.&N'"),
+            "loser": ("bHatsune Miku&Wlooks pissed.&N",
+                      "She yells '&LOh, ok then! Be like that!.&N")
+        }
     }
 }
 
