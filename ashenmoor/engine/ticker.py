@@ -1,267 +1,198 @@
 """
 ashenmoor.engine.ticker
 ───────────────────────
-Auto-combat REPL.
-
-Uses select() on stdin so the combat tick fires every TICK_INTERVAL
-seconds regardless of whether the player is typing.
-
-Prompt behaviour
-────────────────
-  The prompt is only (re)printed when there is actually something to
-  show the player:
-    • The player typed a command  → show result, then prompt.
-    • Combat tick produced output → show output, then prompt.
-    • Idle timeout, no combat     → do nothing, no extra prompt printed.
-
-This prevents the cursor line from being spammed with prompts while the
-player is just standing around.
+Auto-combat REPL for local stdin/stdout play.
+Login flow uses the shared ashenmoor.engine.login module.
 """
 
 import sys
 import time
 import select
+import asyncio
 
 from ..color import diku_to_ansi, cprint
 
-TICK_INTERVAL = 4.0   # seconds between auto-attack rounds
+TICK_INTERVAL = 4.0
 
 
+def _build_prompt(state) -> str:
+    name = state.player
+    char = state.characters.get(name)
+    if not char:
+        return diku_to_ansi("&g> &N")
 
-# ── Login / character selection ───────────────────────────────────────────────
+    hp   = getattr(char, "hp",        0)
+    mhp  = getattr(char, "max_hp",    1)
+    temp = getattr(char, "temp_hp",   0)
+    mv   = getattr(char, "moves",     0)
+    mmv  = getattr(char, "max_moves", 1)
 
-def _char_exists(conn, name: str) -> bool:
-    """Return True if *name* is in the characters table."""
-    row = conn.execute(
-        "SELECT 1 FROM characters WHERE name = ?", (name,)
-    ).fetchone()
-    return row is not None
+    if temp > 0:
+        hp_color   = "&M"
+        hp_display = hp + temp
+    else:
+        pct      = hp / max(1, mhp)
+        hp_color = "&+G" if pct > 0.66 else ("&+Y" if pct > 0.33 else "&+R")
+        hp_display = hp
+
+    dnd       = getattr(char, "dnd", {}) or {}
+    resources = []
+
+    sw  = dnd.get("second_wind_uses", 0)
+    swm = dnd.get("second_wind_max",  0)
+    if swm: resources.append(f"SW:{sw}/{swm}")
+
+    as_ = dnd.get("action_surge_uses", 0)
+    asm = dnd.get("action_surge_max",  0)
+    if asm: resources.append(f"AS:{as_}/{asm}")
+
+    ind  = dnd.get("indomitable_uses", 0)
+    indm = dnd.get("indomitable_max",  0)
+    if indm: resources.append(f"IND:{ind}/{indm}")
+
+    sd  = dnd.get("superiority_dice",     0)
+    sdm = dnd.get("superiority_dice_max", 0)
+    sds = dnd.get("superiority_die_size", 8)
+    if sdm:
+        rip_state = "&Garmed&N" if dnd.get("riposte_armed") else "ready"
+        if sd == 0: rip_state = "&R0&N"
+        resources.append(f"SD:{sd}d{sds} RIP:{rip_state}")
+
+    res_str  = " ".join(resources)
+    chevron  = "&R>&N" if name in state.fighting else "&g>&N"
+    res_part = f" | {res_str}" if res_str else ""
+
+    raw = (
+        f"&w[{hp_color}{hp_display}&w/{mhp}hp "
+        f"&W{mv}&w/{mmv}mv{res_part}&w] {chevron} &N"
+    )
+    return diku_to_ansi(raw)
 
 
-def _make_new_warrior(name: str, races: dict):
-    """Create a fresh level-1 Human Warrior with the standard starter stats."""
-    from ..core.character           import Character
-    from ..dnd.classes.warrior      import new_warrior_dnd, WARRIOR_POWERS
+def _sync_subclass_selection(char) -> None:
+    from ..engine.subclass import run_subclass_selection
 
-    return Character({
-        "name":      name,
-        "race":      "Human",
-        "class":     "Warrior",
-        "level":     1,
-        "stats":     [90, 90, 90, 70, 70, 70],   # STR DEX CON INT WIS CHA
-        "dnd":       new_warrior_dnd(level=1, fighting_style="dueling"),
-        "powers":    WARRIOR_POWERS,
-        "alignment": "True Neutral",
-        "position":  "standing",
-    }, races=races)
+    async def _send(text: str) -> None:
+        sys.stdout.write(diku_to_ansi(text) + "\n")
+        sys.stdout.flush()
+
+    async def _recv() -> str:
+        return input("").strip()
+
+    asyncio.run(run_subclass_selection(char, send=_send, recv=_recv))
 
 
-def _make_shell_char(name: str, row, races: dict):
+def login_crepl(state, start_room: int, races: dict,
+                db_path: str = "ashenmoor.db") -> None:
     """
-    Build a Character shell matching the class/race stored in *row*,
-    then let load_character() fill in the real stats from the DB.
-
-    We need the dnd dict to match the saved class so that warrior
-    features (Second Wind, Action Surge) work after loading.
+    Interactive login for the local console.
+    Uses the shared login flow from engine.login.
     """
-    from ..core.character           import Character
-    from ..dnd.classes.warrior      import new_warrior_dnd, WARRIOR_POWERS
-
-    cclass = row["class"]
-    level  = row["level"]
-
-    d: dict = {
-        "name":   name,
-        "race":   row["race"],
-        "class":  cclass,
-        "level":  level,
-        "stats":  [75] * 6,   # overwritten by load_character
-    }
-
-    if cclass.lower() in ("warrior", "fighter"):
-        d["dnd"]    = new_warrior_dnd(level=level)
-        d["powers"] = WARRIOR_POWERS
-
-    return Character(d, races=races)
-
-
-def login_crepl(
-    state,
-    start_room: int,
-    races:      dict,
-    db_path:    str  = "ashenmoor.db",
-) -> None:
-    """
-    Interactive login / character-creation flow.
-
-    Prompts for a character name, checks the database, and either:
-      • loads an existing character, or
-      • offers to create a new level-1 Human Warrior.
-
-    After a character is selected, sets state.player and
-    state.locations[name], then returns so auto_crepl() can start.
-
-    Parameters
-    ----------
-    state       : GameState (world already loaded via load_world).
-    start_room  : Vnum of the default starting room for new characters.
-    races       : RACES dict to pass into Character().
-    db_path     : Path to the SQLite database file.
-    """
-    import sqlite3
-    from ..engine.persist import open_db, save_character, load_character
+    from ..engine.persist import open_db
+    from ..engine.login   import run_login_flow
 
     conn = open_db(db_path)
 
-    cprint("\n&+W╔══════════════════════════════╗&N")
-    cprint("&+W║      W e l c o m e  t o      ║&N")
-    cprint("&+W║      R i v e r m o o r       ║&N")
-    cprint("&+W╚══════════════════════════════╝&N\n")
+    async def _send(text: str) -> None:
+        sys.stdout.write(diku_to_ansi(text))
+        sys.stdout.flush()
 
-    while True:
-        name_raw = input("Who would you like to be known as? ").strip()
-        if not name_raw:
-            continue
-        # Capitalise first letter, lowercase the rest
-        name = name_raw[0].upper() + name_raw[1:].lower()
+    async def _recv() -> str:
+        return input("").strip()
 
-        if not _char_exists(conn, name):
-            # ── New character ─────────────────────────────────────────────
-            cprint(f"\n&wThat character does not exist.&N")
-            cprint(f"&wWould you like to create &W{name}&w now?&N")
-            answer = input("(yes/no) > ").strip().lower()
-            if answer not in ("yes", "y"):
-                cprint("&wVery well. Enter another name.&N\n")
-                continue
+    async def _run():
+        return await run_login_flow(
+            state      = state,
+            conn       = conn,
+            send       = _send,
+            recv       = _recv,
+            start_room = start_room,
+            races      = races,
+        )
 
-            char = _make_new_warrior(name, races)
-            save_character(conn, char, location=start_room, include_hp=True)
+    result = asyncio.run(_run())
 
-            state.characters[name]  = char
-            state.locations[name]   = start_room
-            state.player            = name
+    if result is None:
+        sys.exit(0)
 
-            cprint(f"\n&+WCharacter &N{name}&+W has been created!&N")
-            cprint("&wYou are a level &W1&w Human Warrior.&N")
-            cprint("&x(STR 90 / DEX 90 / CON 90 / INT 70 / WIS 70 / CHA 70)&N\n")
-            break
+    char, account_id, room_vnum = result
+    state.player = char.name
+    state._db    = conn
 
-        else:
-            # ── Existing character ────────────────────────────────────────
-            row = conn.execute(
-                "SELECT race, class, level FROM characters WHERE name = ?",
-                (name,),
-            ).fetchone()
+    # Store account_id for save calls
+    state._account_ids = getattr(state, "_account_ids", {})
+    state._account_ids[char.name] = account_id
 
-            char      = _make_shell_char(name, row, races)
-            saved_room = load_character(conn, name, char)
-            room_vnum  = saved_room if saved_room else start_room
-
-            state.characters[name] = char
-            state.locations[name]  = room_vnum
-            state.player           = name
-
-            cprint(f"\n&+WWelcome back, &N{name}&+W!&N")
-            cprint(f"&x(Level {char.level} {char.race} {char.cclass})&N\n")
-            break
-
-    # Store the connection on state so GameState can use it for saves
-    state._db = conn
+    # Subclass selection if needed
+    from ..engine.subclass import needs_subclass
+    if needs_subclass(char):
+        _sync_subclass_selection(char)
+        from ..engine.persist import save_character
+        save_character(conn, char, room_vnum, account_id=account_id)
 
 
-def auto_crepl(
-    state,
-    prompt:    str   = "&g> &N",
-    quit_cmds: tuple = ("quit", "exit", "q"),
-    banner:    str   = "",
-    farewell:  str   = "",
-) -> None:
-    """
-    Drop-in replacement for crepl() with automatic combat ticks.
+def auto_crepl(state, prompt: str = "&g> &N",
+               quit_cmds: tuple = ("quit", "exit", "q"),
+               banner: str = "", farewell: str = "") -> None:
+    from ..engine.subclass import needs_subclass
 
-    While state.fighting is set:
-      • An auto-attack round fires every TICK_INTERVAL seconds.
-      • Powers fire immediately when typed, subject to their cooldown.
-      • Movement is blocked (use 'flee' to escape).
-
-    Outside combat the loop behaves like a normal REPL with no extra output.
-    """
     if banner:
         cprint(banner)
 
-    base_prompt = diku_to_ansi(prompt)
-
-    def _build_prompt() -> str:
-        """Show HP in the prompt while in combat."""
-        if state.fighting:
-            char = state.characters.get(state.player)
-            if char:
-                hp  = getattr(char, "hp",     "?")
-                mhp = getattr(char, "max_hp",  "?")
-                return diku_to_ansi(f"&w[&W{hp}&w/&W{mhp}&whp] &g>&N ")
-        return base_prompt
-
     last_tick = time.monotonic()
-
-    # Show the initial prompt once.
-    sys.stdout.write(_build_prompt())
+    sys.stdout.write(_build_prompt(state))
     sys.stdout.flush()
 
     while True:
         now          = time.monotonic()
         time_to_tick = max(0.05, TICK_INTERVAL - (now - last_tick))
 
-        # Wait for input up to time_to_tick seconds.
         try:
             ready, _, _ = select.select([sys.stdin], [], [], time_to_tick)
         except (KeyboardInterrupt, EOFError):
             break
 
-        # Track whether we have anything to show so we know whether to
-        # reprint the prompt at the bottom of this iteration.
         need_prompt = False
 
-        # ── Player typed something ────────────────────────────────────────
         if ready:
             try:
                 raw = sys.stdin.readline()
             except (KeyboardInterrupt, EOFError):
                 break
-
-            if not raw:   # EOF — Ctrl-D
+            if not raw:
                 break
 
             raw = raw.strip()
-
             if raw:
                 if raw.lower() in quit_cmds:
                     break
 
-                result = state.handle(raw)
-
-                if result == "quit":
-                    break
-
-                sys.stdout.write("\n")
-                if result:
-                    cprint(result)
+                char = state.characters.get(state.player)
+                if char and needs_subclass(char):
+                    sys.stdout.write("\n")
+                    _sync_subclass_selection(char)
+                    if state._db:
+                        from ..engine.persist import save_character
+                        account_id = getattr(state, "_account_ids", {}).get(state.player, 0)
+                        save_character(state._db, char,
+                                       state.locations.get(state.player, 0),
+                                       account_id=account_id)
+                    need_prompt = True
+                else:
+                    result = state.handle(raw)
+                    if result == "quit":
+                        break
+                    sys.stdout.write("\n")
+                    if result:
+                        cprint(result)
+                    need_prompt = True
             else:
-                # Player pressed Enter on a blank line — just drop to a
-                # new line and give them a fresh prompt.
                 sys.stdout.write("\n")
+                need_prompt = True
 
-            # Always show a prompt after the player types something.
-            need_prompt = True
-
-        # ── Tick check ────────────────────────────────────────────────────
         now = time.monotonic()
         if (now - last_tick) >= TICK_INTERVAL:
-            last_tick += TICK_INTERVAL   # advance by one interval, no drift
-
-            # Always check for mob aggro (fires even when not in combat).
-            # This is the tick-based fallback for the sneak mechanic:
-            # _check_aggro() fires on room entry; mob_aggro_tick() fires
-            # every 4 seconds, catching sneaking players after one window.
+            last_tick += TICK_INTERVAL
             tick_output = None
             if state.fighting:
                 tick_output = state.combat_tick()
@@ -269,13 +200,12 @@ def auto_crepl(
                 tick_output = state.mob_aggro_tick()
 
             if tick_output:
-                sys.stdout.write("\r\033[K")   # clear prompt line
+                sys.stdout.write("\r\033[K")
                 cprint(tick_output)
                 need_prompt = True
 
-        # ── Reprint prompt only when needed ──────────────────────────────
         if need_prompt:
-            sys.stdout.write(_build_prompt())
+            sys.stdout.write(_build_prompt(state))
             sys.stdout.flush()
 
     if farewell:
